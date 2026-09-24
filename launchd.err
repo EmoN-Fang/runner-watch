@@ -1,0 +1,4 @@
+/Users/hzmacsg/Apps/runner-watch/heartbeat.sh: line 7: declare: -A: invalid option
+declare: usage: declare [-afFirtx] [-p] [name[=value] ...]
+/Users/hzmacsg/Apps/runner-watch/heartbeat.sh: line 8: declare: -A: invalid option
+declare: usage: declare [-afFirtx] [-p] [name[=value] ...]

@@ -1,0 +1,50 @@
+name: runner-watch
+on:
+  schedule:
+    - cron: '23 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_fail:
+        description: '演练:强制失败以验证邮件通知'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: check heartbeat
+        shell: bash
+        env:
+          GIST_RAW: https://gist.githubusercontent.com/EmoN-Fang/f3edf5622ee57477df44b88516534117/raw/heartbeat.json
+          FORCE_FAIL: ${{ inputs.force_fail }}
+        run: |
+          set -u
+          body=""
+          for i in 1 2 3; do body=$(curl -fsSL "$GIST_RAW?nocache=$RANDOM") && break; sleep 20; done
+          [ -n "$body" ] || { echo "::error::heartbeat gist unreachable"; exit 1; }
+          now=$(date -u +%s); epoch=$(echo "$body" | jq -r .epoch); age=$(( (now - epoch) / 60 ))
+          a=$(echo "$body" | jq -r .runners.A); b=$(echo "$body" | jq -r .runners.B)
+          qa=$(echo "$body" | jq -r .queued_min.A); qb=$(echo "$body" | jq -r .queued_min.B)
+          echo "heartbeat age ${age} min; runner A=$a B=$b; longest queued job A=${qa} min B=${qb} min"
+          fail=0
+          [ "$age" -le 45 ] || { echo "::error::heartbeat stale for ${age} min: runner host down or offline"; fail=1; }
+          [ "$a" = online ] || { echo "::error::runner A not online ($a)"; fail=1; }
+          [ "$b" = online ] || { echo "::error::runner B not online ($b)"; fail=1; }
+          [ "$qa" -le 30 ] || { echo "::error::runner A has a job queued for ${qa} min"; fail=1; }
+          [ "$qb" -le 30 ] || { echo "::error::runner B has a job queued for ${qb} min"; fail=1; }
+          [ "${FORCE_FAIL:-false}" != "true" ] || { echo "::error::演练:按要求强制失败"; fail=1; }
+          exit $fail
+      - name: keep repository active
+        if: success() && github.event_name == 'schedule'
+        shell: bash
+        run: |
+          case "$(date -u +%d)" in 01|15) ;; *) exit 0 ;; esac
+          d=$(date -u +%Y-%m-%d); f=status/last-ok.txt
+          [ "$(cat "$f" 2>/dev/null)" = "$d" ] && exit 0
+          echo "$d" > "$f"
+          git config user.name runner-watch; git config user.email runner-watch@users.noreply.github.com
+          git add "$f" && git commit -qm "keepalive $d" && git push -q
