@@ -4,20 +4,23 @@
 export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
 cd "$(dirname "$0")" || exit 1
 GIST=$(cat gist-id)
-declare -A REPO=([A]=EmoN-Fang/ToDoApp [B]=EmoN-Fang/ccg)
-declare -A NAME=([A]=hz-mac [B]=hz-mac-ccg)
 now=$(date -u +%s)
 status_json=""; queue_json=""
 for k in A B; do
-  st=$(gh api "repos/${REPO[$k]}/actions/runners" --jq ".runners[] | select(.name==\"${NAME[$k]}\") | .status" 2>/dev/null || true)
+  # macOS 自带 bash 3.2 无关联数组,用 case 映射别名 → 仓库/runner 名
+  case "$k" in
+    A) repo=EmoN-Fang/ToDoApp; name=hz-mac ;;
+    B) repo=EmoN-Fang/ccg; name=hz-mac-ccg ;;
+  esac
+  st=$(gh api "repos/$repo/actions/runners" --jq ".runners[] | select(.name==\"$name\") | .status" 2>/dev/null || true)
   [ -z "$st" ] && st="api-error"
   qmax=0
-  for rid in $(gh api "repos/${REPO[$k]}/actions/runs?status=queued&per_page=10" --jq '.workflow_runs[].id' 2>/dev/null; gh api "repos/${REPO[$k]}/actions/runs?status=in_progress&per_page=10" --jq '.workflow_runs[].id' 2>/dev/null); do
+  for rid in $(gh api "repos/$repo/actions/runs?status=queued&per_page=10" --jq '.workflow_runs[].id' 2>/dev/null; gh api "repos/$repo/actions/runs?status=in_progress&per_page=10" --jq '.workflow_runs[].id' 2>/dev/null); do
     while read -r created; do
       [ -z "$created" ] && continue
       c=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$created" +%s 2>/dev/null || echo "$now")
       age=$(( (now - c) / 60 )); [ "$age" -gt "$qmax" ] && qmax=$age
-    done < <(gh api "repos/${REPO[$k]}/actions/runs/$rid/jobs?per_page=100" --jq '.jobs[] | select(.status=="queued") | .created_at' 2>/dev/null)
+    done < <(gh api "repos/$repo/actions/runs/$rid/jobs?per_page=100" --jq '.jobs[] | select(.status=="queued") | .created_at' 2>/dev/null)
   done
   status_json="$status_json\"$k\":\"$st\","; queue_json="$queue_json\"$k\":$qmax,"
 done

@@ -5,11 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       force_fail:
-        description: '演练:强制失败以验证邮件通知'
+        description: '演练:强制告警以验证 Issue 通知'
         type: boolean
         default: false
 permissions:
   contents: write
+  issues: write
 jobs:
   watch:
     runs-on: ubuntu-latest
@@ -17,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: check heartbeat
+        id: check
         shell: bash
         env:
           GIST_RAW: https://gist.githubusercontent.com/EmoN-Fang/f3edf5622ee57477df44b88516534117/raw/heartbeat.json
@@ -25,19 +27,53 @@ jobs:
           set -u
           body=""
           for i in 1 2 3; do body=$(curl -fsSL "$GIST_RAW?nocache=$RANDOM") && break; sleep 20; done
-          [ -n "$body" ] || { echo "::error::heartbeat gist unreachable"; exit 1; }
-          now=$(date -u +%s); epoch=$(echo "$body" | jq -r .epoch); age=$(( (now - epoch) / 60 ))
-          a=$(echo "$body" | jq -r .runners.A); b=$(echo "$body" | jq -r .runners.B)
-          qa=$(echo "$body" | jq -r .queued_min.A); qb=$(echo "$body" | jq -r .queued_min.B)
-          echo "heartbeat age ${age} min; runner A=$a B=$b; longest queued job A=${qa} min B=${qb} min"
-          fail=0
-          [ "$age" -le 45 ] || { echo "::error::heartbeat stale for ${age} min: runner host down or offline"; fail=1; }
-          [ "$a" = online ] || { echo "::error::runner A not online ($a)"; fail=1; }
-          [ "$b" = online ] || { echo "::error::runner B not online ($b)"; fail=1; }
-          [ "$qa" -le 30 ] || { echo "::error::runner A has a job queued for ${qa} min"; fail=1; }
-          [ "$qb" -le 30 ] || { echo "::error::runner B has a job queued for ${qb} min"; fail=1; }
-          [ "${FORCE_FAIL:-false}" != "true" ] || { echo "::error::演练:按要求强制失败"; fail=1; }
-          exit $fail
+          problems=()
+          if [ -z "$body" ]; then
+            problems+=("心跳 gist 读不到(GitHub 或网络问题)")
+          else
+            now=$(date -u +%s); epoch=$(echo "$body" | jq -r .epoch); age=$(( (now - epoch) / 60 ))
+            a=$(echo "$body" | jq -r .runners.A); b=$(echo "$body" | jq -r .runners.B)
+            qa=$(echo "$body" | jq -r .queued_min.A); qb=$(echo "$body" | jq -r .queued_min.B)
+            echo "heartbeat age ${age} min; runner A=$a B=$b; longest queued job A=${qa} min B=${qb} min"
+            [ "$age" -le 45 ] || problems+=("心跳已 ${age} 分钟没更新:Mac mini 关机、断网或休眠")
+            [ "$a" = online ] || problems+=("runner A(ToDoApp)状态 $a,不是 online")
+            [ "$b" = online ] || problems+=("runner B(ccg)状态 $b,不是 online")
+            [ "$qa" -le 30 ] || problems+=("runner A 有作业排队 ${qa} 分钟没人接")
+            [ "$qb" -le 30 ] || problems+=("runner B 有作业排队 ${qb} 分钟没人接")
+          fi
+          [ "${FORCE_FAIL:-false}" != "true" ] || problems+=("演练:手动触发的强制告警,不是真故障")
+          {
+            echo "problems<<EOM"
+            printf '%s\n' "${problems[@]}"
+            echo "EOM"
+            echo "fail=$([ ${#problems[@]} -gt 0 ] && echo 1 || echo 0)"
+          } >> "$GITHUB_OUTPUT"
+          for p in "${problems[@]}"; do echo "::error::$p"; done
+      - name: open or close alarm issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FAIL: ${{ steps.check.outputs.fail }}
+          PROBLEMS: ${{ steps.check.outputs.problems }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -u
+          gh label create runner-alarm --repo "$REPO" --color B60205 --description "自架 runner 掉线/排队告警" --force >/dev/null 2>&1 || true
+          open=$(gh issue list --repo "$REPO" --label runner-alarm --state open --json number --jq '.[0].number // empty')
+          when=$(TZ=Asia/Singapore date '+%Y-%m-%d %H:%M SGT')
+          if [ "$FAIL" = 1 ]; then
+            if [ -z "$open" ]; then
+              body=$(printf '@EmoN-Fang 巡检发现问题(%s):\n\n%s\n\n处理:看 Mac mini 是否开机、联网、runner 服务是否在跑;恢复后本 Issue 会自动关闭。\n\n巡检记录:%s' "$when" "$(echo "$PROBLEMS" | sed 's/^/- /')" "$RUN_URL")
+              gh issue create --repo "$REPO" --label runner-alarm --title "🚨 自架 runner 告警 $when" --body "$body"
+            else
+              echo "alarm issue #$open already open; not re-notifying"
+            fi
+            exit 1
+          fi
+          if [ -n "$open" ]; then
+            gh issue close "$open" --repo "$REPO" --comment "$when 巡检恢复正常,自动关闭。记录:$RUN_URL"
+          fi
       - name: keep repository active
         if: success() && github.event_name == 'schedule'
         shell: bash
